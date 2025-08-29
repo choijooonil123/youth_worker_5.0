@@ -165,6 +165,9 @@
 
       <div class="row">
         <button id="speakBtn" class="btn">🔊 질문 다시듣기</button>
+        <!-- ▼ 추가: 정답 듣기 버튼 -->
+        <button id="ttsAnswerBtn" class="btn">🔊 정답 듣기</button>
+        <!-- ▲ -->
         <button id="recordBtn" class="btn">🎤 답변녹음</button>
         <button id="submitBtn" class="btn primary">✅ 답변완료</button>
         <button id="addAnswerBtn" class="btn" style="display:none">➕ 정답 추가</button>
@@ -182,9 +185,8 @@
         <textarea id="extraInfo" rows="5" placeholder="핵심 요점, 배경지식, 예시 등을 적어두세요."></textarea>
         <button id="saveExtraInfoBtn" class="btn">💾 추가설명 저장</button>
         <button id="expandExtraInfoBtn" class="btn">🔎 전체보기</button>
-        <!-- ▼▼▼ 추가: 추가설명 음성듣기 버튼 (필수 변경만) ▼▼▼ -->
+        <!-- 기존에 추가한: 추가설명 듣기 버튼 -->
         <button id="ttsExtraBtn" class="btn">🔊 추가설명 듣기</button>
-        <!-- ▲▲▲ -->
       </div>
 
       <div>
@@ -209,7 +211,7 @@
 
     const LS_SHARED = 'yj_shared_backup_v1';
     const LS_PROG   = 'yj_progress_backup_v1';
-    const LS_LOCAL_OVR = 'yj_local_overrides_v1'; // ★ JSON 문항 로컬 전용 오버레이
+    const LS_LOCAL_OVR = 'yj_local_overrides_v1';
 
     const ADMIN_EMAILS = new Set([
       // 'admin@example.com'
@@ -232,9 +234,9 @@
     function lsGet(key, def){ try{ const v=localStorage.getItem(key); return v? JSON.parse(v): def; }catch{return def;} }
     function lsSet(key, val){ localStorage.setItem(key, JSON.stringify(val)); }
 
-    /* ====== ★ 로컬 오버레이 헬퍼 ====== */
+    /* ====== 로컬 오버레이 헬퍼 ====== */
     function loadLocalOverrides(){
-      return lsGet(LS_LOCAL_OVR, {}); // { "과목::질문": {answers, active, extraInfo, followups} }
+      return lsGet(LS_LOCAL_OVR, {});
     }
     function saveLocalOverride(id, patch){
       const ov = loadLocalOverrides();
@@ -288,7 +290,7 @@
       }catch(e){ console.warn('ensureUserProfile fail', e); }
     }
     async function loadUsersMap(){
-      const map = new Map(); // uid -> {displayName, role}
+      const map = new Map();
       try{
         if(!window.__cloudReady) return map;
         const { getDocs } = window.__fb_api;
@@ -309,7 +311,7 @@
           const snap = await getDocs(window.__fb.colShared());
           const arr = [];
           snap.forEach(d => arr.push(d.data()));
-          lsSet(LS_SHARED, arr); // 로컬 백업
+          lsSet(LS_SHARED, arr);
           return arr;
         }catch(e){
           console.warn('[loadShared] cloud fail -> local fallback', e);
@@ -318,7 +320,7 @@
       return lsGet(LS_SHARED, []);
     }
     async function saveShared(array){
-      lsSet(LS_SHARED, array); // 로컬 항상 유지
+      lsSet(LS_SHARED, array);
       if(window.__cloudReady){
         try{
           const { writeBatch, doc } = window.__fb_api;
@@ -336,8 +338,6 @@
     }
     async function persistQuestion(q){
       const id = qKey(q);
-
-      /* ★ JSON 출신은 Firestore에 저장 금지 → 로컬 오버레이에만 저장 */
       if (q && q._localOnly){
         saveLocalOverride(id, {
           answers: (q.answers||[]),
@@ -347,8 +347,6 @@
         });
         return;
       }
-
-      // (기존 공유 저장 로직)
       const local = lsGet(LS_SHARED, []);
       const rec = { subject:q.subject, question:q.question, answers:q.answers||[], active:q.active||0, extraInfo:q.extraInfo||'', followups:q.followups||[] };
       const i = local.findIndex(x=> qKey(x)===id);
@@ -366,14 +364,10 @@
     }
     async function deleteSharedQuestion(q){
       const id = qKey(q);
-
-      /* ★ JSON 출신은 Firestore에 존재하지 않음 → 로컬 오버레이만 제거 */
       if (q && q._localOnly){
         deleteLocalOverride(id);
         return;
       }
-
-      // (기존 공유 삭제 로직)
       const local = lsGet(LS_SHARED, []);
       lsSet(LS_SHARED, local.filter(x=> qKey(x)!==id));
       if(window.__cloudReady){
@@ -393,7 +387,7 @@
           const { getDocs } = window.__fb_api;
           const snap = await getDocs(window.__fb.colProgress());
           const obj = {};
-          snap.forEach(d => { obj[d.id] = d.data(); }); // key = uid
+          snap.forEach(d => { obj[d.id] = d.data(); });
           lsSet(LS_PROG, obj);
           return obj;
         }catch(e){
@@ -427,8 +421,6 @@
         .map(uid=>{
           const learned = (progress[uid]?.learnedIds || []).length;
           const rate = ((learned / total) * 100).toFixed(1);
-
-          // 표시이름 우선, 없으면 '사용자'
           const info = usersMap.get(uid) || { displayName: '사용자', role: 'user' };
           return { uid, name: info.displayName || '사용자', role: info.role || 'user', learned, rate };
         })
@@ -474,7 +466,7 @@
       lo.style.display    = 'inline-block';
     }
 
-    /* ===== 표시이름을 즉시 헤더에 보여주기(대기 없이) — 유지 ===== */
+    /* ===== 표시이름을 즉시 헤더에 보여주기 ===== */
     function setHeaderImmediate(){
       if(!currentUser) return;
       const userEl = document.getElementById('headerUser');
@@ -505,7 +497,7 @@
         active: (typeof x.active==='number'? x.active:0),
         extraInfo: (typeof x.extraInfo==='string')? x.extraInfo : '',
         followups: Array.isArray(x.followups)? x.followups.filter(f=>f&&f.q&&f.a) : [],
-        _localOnly: true // ★ JSON 출신은 로컬 전용
+        _localOnly: true
       }));
     }
     async function mergeWithShared(baseStd){
@@ -533,8 +525,6 @@
           });
         }
       });
-
-      /* ★ 로컬 오버레이 덮어쓰기 (JSON 문항의 사용자 편집내용 반영) */
       const ov = loadLocalOverrides();
       for(const [id, q] of map){
         if(q._localOnly && ov[id]){
@@ -545,7 +535,6 @@
           if(Array.isArray(o.followups)) q.followups = o.followups;
         }
       }
-
       raw=Array.from(map.values()).map((q,i)=>({...q,_idx:i}));
     }
 
@@ -555,29 +544,24 @@
       const learned = currentUser ? new Set((p[currentUser.uid]?.learnedIds)||[]) : new Set();
       data = raw.filter(q=> !learned.has(qKey(q))).map(q=>({...q}));
     }
-
     async function updateCounts(){
       const subj = currentSubject();
       const p = await loadProgress();
       const learnedIds = currentUser ? new Set((p[currentUser.uid]?.learnedIds || [])) : new Set();
-
       const subjectAll = raw.filter(q => normSubj(q.subject) === subj);
       const subjectTotal = subjectAll.length;
-
       const subjectLearned = subjectAll.reduce((acc,q)=>{
         return acc + (learnedIds.has(`${normSubj(q.subject)}::${q.question}`) ? 1 : 0);
       }, 0);
-
       document.getElementById('countTotal').textContent   = `과목별 : 총문제수 ${subjectTotal}`;
       document.getElementById('countLearned').textContent = `과목별 : 습득수 ${subjectLearned}`;
     }
 
-    /* ================= 과목/리스트 (안정화) ================= */
+    /* ================= 과목/리스트 ================= */
     function subjects(){
       const list = raw.map(q => normSubj(q.subject));
       return Array.from(new Set(list)).sort((a,b)=> a.localeCompare(b));
     }
-
     function initSubjectSelect(){
       const sel = document.getElementById('subjectSelect');
       const prev = sel.value;
@@ -591,14 +575,12 @@
       renderBySubject(currentSubject());
       updateCounts();
     }
-
     function currentSubject(){
       const sel=document.getElementById('subjectSelect');
       const subs = subjects();
       if(sel && sel.value && subs.includes(sel.value)) return sel.value;
       return subs[0] || '기타';
     }
-
     function renderBySubject(subj){
       const grid=document.getElementById('grid');
       if(!raw || raw.length===0){
@@ -625,8 +607,8 @@
       document.getElementById('mainPanel').style.display='block';
       document.getElementById('logoutBtn').style.display='inline-block';
       document.getElementById('grid').innerHTML = '<div style="opacity:.7;padding:12px">데이터 불러오는 중…</div>';
-      await quickRenderBase(); // 1단계
-      await bootstrap();       // 2단계
+      await quickRenderBase();
+      await bootstrap();
       await renderRanks();
       await updateHeaderUser();
     }
@@ -638,8 +620,6 @@
         if(!email||!pass){ showError('이메일과 비밀번호를 입력하세요.'); return; }
         const { signInWithEmailAndPassword } = window.__fb_api;
         await signInWithEmailAndPassword(window.__fb.auth, email, pass);
-
-        // 로그인 성공 후 안전망: 훅이 늦게 오거나 누락될 때 즉시 전환
         const u = window.__fb.auth.currentUser;
         if (u) {
           currentUser = { uid: u.uid, name: u.displayName || (u.email ? u.email.split('@')[0] : '사용자'), role: ADMIN_EMAILS.has(u.email) ? 'admin' : 'user' };
@@ -708,7 +688,6 @@
       }catch(e){
         console.warn('[logout] fail', e);
       }finally{
-        // 훅 지연/누락 대비: 즉시 UI 원복 (화면전환 보장)
         currentUser = null;
         document.getElementById('mainPanel').style.display='none';
         document.getElementById('loginPanel').style.display='block';
@@ -718,7 +697,7 @@
       }
     };
 
-    /*================= 인증 상태 변화 핸들러 (원래 버전으로 복구) =================*/
+    /*================= 인증 상태 변화 핸들러 =================*/
     (function watchAuth(){
       if(!window.__cloudReady) return;
       const { onAuthStateChanged } = window.__fb_api;
@@ -730,15 +709,12 @@
             name: user.displayName || (user.email ? user.email.split('@')[0] : '사용자'),
             role: ADMIN_EMAILS.has(user.email) ? 'admin' : 'user'
           };
-
-          // 헤더 즉시 반영 (첫 화면에서 표시이름 보이도록)
           const userEl = document.getElementById('headerUser');
           const lo = document.getElementById('logoutBtn');
           userEl.textContent = `사용자: ${currentUser.name}`;
           userEl.style.display = 'inline-block';
           lo.style.display = 'inline-block';
-
-          await postLoginUI();  // ▶ 로그인 화면 → 메인 화면 전환
+          await postLoginUI();
         }else{
           currentUser = null;
           document.getElementById('mainPanel').style.display='none';
@@ -779,7 +755,7 @@
       await updateHeaderUser();
     }
 
-    /* ================= 질문 모달/음성/유사도/추가기능 (기존 유지) ================= */
+    /* ================= 질문 모달/음성/유사도/추가기능 ================= */
     function openQuestion(idx){
       currentIdx=idx;
       const q=raw.find(x=>x._idx===idx); if(!q) return;
@@ -802,13 +778,22 @@
     function speak(txt){ const u=new SpeechSynthesisUtterance(txt); u.lang='ko-KR'; speechSynthesis.cancel(); speechSynthesis.speak(u); }
     document.getElementById('speakBtn').onclick = ()=>{ const q=raw.find(x=>x._idx===currentIdx); if(q) speak(q.question); };
 
-    // ▼▼▼ 추가: '추가설명 듣기' 버튼 동작 (필요 최소 코드) ▼▼▼
+    // 추가설명 듣기
     document.getElementById('ttsExtraBtn').onclick = ()=>{
       const txt = (document.getElementById('extraInfo').value||'').trim();
       if(!txt){ alert('추가설명 내용이 없습니다.'); return; }
       speak(txt);
     };
-    // ▲▲▲
+
+    // ▼ 추가: 정답 듣기 동작
+    document.getElementById('ttsAnswerBtn').onclick = ()=>{
+      const q = raw.find(x=>x._idx===currentIdx);
+      if(!q){ alert('문항을 먼저 선택하세요.'); return; }
+      const gold = (q.answers && q.answers.length) ? (q.answers[q.active||0] || q.answers[0]) : '';
+      if(!gold){ alert('등록된 정답이 없습니다.'); return; }
+      speak(gold);
+    };
+    // ▲
 
     function startRecognition(){
       window.SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1016,7 +1001,7 @@
       await bootstrap();
     };
 
-    /* ================= 내보내기/가져오기 (바인딩 안정화) — 유지 ================= */
+    /* ================= 내보내기/가져오기 ================= */
     document.addEventListener('DOMContentLoaded', ()=>{
       const exportBtn = document.getElementById('exportBtn');
       const importBtn = document.getElementById('importBtn');
@@ -1110,4 +1095,4 @@
     })();
   </script>
 </body>
-  </html>
+</html>
