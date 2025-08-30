@@ -43,6 +43,9 @@
     #extraInfo { max-height:50vh; overflow:auto; resize:vertical; }
     .score{font-size:36px;font-weight:800}
     .answer-box, #extraInfo { font-size:14px; } 
+
+    .blink{animation: blink 1s step-start 0s infinite}
+    @keyframes blink{ 50%{ opacity: .2 } }
   </style>
 
   <!-- Firebase SDK (ESM) -->
@@ -149,13 +152,15 @@
           <button id="exportBtn" class="btn">내보내기</button>
           <button id="importBtn" class="btn">가져오기</button>
           <input id="importFile" type="file" accept="application/json" style="display:none">
+          <!-- 관리자 전용 -->
+          <button id="manageUsersBtn" class="btn" style="display:none">사용자 관리(관리자)</button>
         </div>
       </div>
       <div id="grid" class="grid"></div>
     </div>
   </div>
 
-  <!-- 질문 모달 등 이하 기존 로직 유지 -->
+  <!-- 질문 모달 -->
   <dialog id="qd">
     <div class="dlg">
       <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:6px">
@@ -170,15 +175,14 @@
         <button id="submitBtn" class="btn primary">✅ 답변완료</button>
         <button id="addAnswerBtn" class="btn" style="display:none">➕ 정답 추가</button>
 
-        <!-- ▼ 추가: 정답 듣기 버튼 -->
         <button id="ttsAnswerBtn" class="btn">🔊 정답 듣기</button>
-        <!-- ▲ -->      
         <button id="learnedBtn" class="btn ok">📌 습득완료</button>
         <button id="closeBtn" class="btn danger">❌ 닫기</button>
       </div>
 
       <div><div class="answer-box" id="userAnswer"></div></div>
       <div id="result"></div>
+
       <div id="extraAnswers"></div>
 
       <hr style="border:0;border-top:1px solid #1f2a55;margin:8px 0">
@@ -187,7 +191,6 @@
         <textarea id="extraInfo" rows="5" placeholder="핵심 요점, 배경지식, 예시 등을 적어두세요."></textarea>
         <button id="saveExtraInfoBtn" class="btn">💾 추가설명 저장</button>
         <button id="expandExtraInfoBtn" class="btn">🔎 전체보기</button>
-        <!-- 기존에 추가한: 추가설명 듣기 버튼 -->
         <button id="ttsExtraBtn" class="btn">🔊 추가설명 듣기</button>
       </div>
 
@@ -203,6 +206,18 @@
     </div>
   </dialog>
 
+  <!-- 사용자 관리 모달(관리자 전용) -->
+  <dialog id="userMngDlg">
+    <div class="dlg">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <h2 style="margin:0">사용자 관리</h2>
+        <button id="userMngClose" class="btn danger">닫기</button>
+      </div>
+      <div id="userMngList" style="display:flex;flex-direction:column;gap:8px"></div>
+      <div class="pill" style="margin-top:8px">※ 관리자는 목록/순위에서 제외됩니다.</div>
+    </div>
+  </dialog>
+
   <script>
     /* ================= 공통 상태/유틸 ================= */
     let raw = [];        // 전체 문항(공유)
@@ -210,13 +225,15 @@
     let currentUser = null; // { uid, name, role }
     let currentIdx = null;
     let recognition = null;
+    let recBlinkTimer = null;
+    let recFinalOnly = '';  // 최종만 모을 버퍼
 
     const LS_SHARED = 'yj_shared_backup_v1';
     const LS_PROG   = 'yj_progress_backup_v1';
     const LS_LOCAL_OVR = 'yj_local_overrides_v1';
 
     const ADMIN_EMAILS = new Set([
-      // 'admin@example.com'
+      // 필요 시 관리자 이메일을 여기에 추가하세요. 예: 'admin@example.com'
     ]);
 
     const normSubj = s => {
@@ -231,6 +248,11 @@
       if(box){ box.textContent = msg; }
       console.error('[APP]', msg);
     }
+
+    function isAnswerObj(a){ return a && typeof a === 'object' && 'text' in a; }
+    function answerText(a){ return isAnswerObj(a) ? a.text : String(a||''); }
+    function answerOwnerName(a){ return isAnswerObj(a) ? (a.ownerName||'') : ''; }
+    function answerOwnerUid(a){ return isAnswerObj(a) ? (a.ownerUid||'') : ''; }
 
     /* ================= 로컬 폴백 저장소 ================= */
     function lsGet(key, def){ try{ const v=localStorage.getItem(key); return v? JSON.parse(v): def; }catch{return def;} }
@@ -273,10 +295,18 @@
       try{
         if(!window.__cloudReady || !user) return;
         const { db } = window.__fb;
-        const { doc, getDoc, setDoc } = window.__fb_api;
+        const { doc, getDoc, setDoc, getDocs } = window.__fb_api;
+
+        // users 비어있으면 첫 사용자 admin
+        let firstAdmin = false;
+        try{
+          const snapAll = await getDocs(window.__fb.colUsers());
+          firstAdmin = snapAll.empty;
+        }catch(_){}
+
         const ref = doc(db, 'users', user.uid);
         const snap = await getDoc(ref);
-        const role = ADMIN_EMAILS.has(user.email) ? 'admin' : 'user';
+        const role = ADMIN_EMAILS.has(user.email) || firstAdmin ? 'admin' : 'user';
         if(!snap.exists()){
           await setDoc(ref, {
             uid:user.uid, email:user.email||'',
@@ -285,8 +315,9 @@
           });
         }else{
           const d = snap.data()||{};
-          if(d.role!==role || d.displayName!==(user.displayName||d.displayName)){
-            await setDoc(ref, { role, displayName:user.displayName||d.displayName }, { merge:true });
+          const wantRole = ADMIN_EMAILS.has(user.email) ? 'admin' : (d.role||'user');
+          if(d.role!==wantRole || d.displayName!==(user.displayName||d.displayName)){
+            await setDoc(ref, { role: wantRole, displayName:user.displayName||d.displayName }, { merge:true });
           }
         }
       }catch(e){ console.warn('ensureUserProfile fail', e); }
@@ -299,7 +330,7 @@
         const snap = await getDocs(window.__fb.colUsers());
         snap.forEach(docSnap=>{
           const d=docSnap.data()||{};
-          map.set(docSnap.id, { displayName: d.displayName||'사용자', role: d.role||'user' });
+          map.set(docSnap.id, { displayName: d.displayName||'사용자', role: d.role||'user', email: d.email||'' });
         });
       }catch(e){ console.warn('[loadUsersMap] fail', e); }
       return map;
@@ -443,6 +474,7 @@
 
       if(!currentUser){
         rankEl.style.display='none'; userEl.style.display='none'; lo.style.display='none';
+        document.getElementById('manageUsersBtn').style.display='none';
         return;
       }
       const progress = await loadProgress();
@@ -466,6 +498,9 @@
       rankEl.style.display='inline-block';
       userEl.style.display='inline-block';
       lo.style.display    = 'inline-block';
+
+      // 관리자 전용 버튼
+      document.getElementById('manageUsersBtn').style.display = currentUser.role==='admin' ? 'inline-block' : 'none';
     }
 
     /* ===== 표시이름을 즉시 헤더에 보여주기 ===== */
@@ -510,7 +545,19 @@
         const id=qKey(q);
         if(map.has(id)){
           const cur=map.get(id);
-          cur.answers=[...new Set([...(cur.answers||[]), ...((q.answers||[]).filter(Boolean))])];
+          const mergedAnswers = [...(cur.answers||[]), ...((q.answers||[]).filter(Boolean))];
+          // 중복 제거: 텍스트 기준
+          const uniq = [];
+          const seen = new Set();
+          for(const a of mergedAnswers){
+            const t = answerText(a);
+            const key = t.trim();
+            if(!key) continue;
+            if(seen.has(key)) continue;
+            seen.add(key);
+            uniq.push(a);
+          }
+          cur.answers = uniq;
           if(!cur.extraInfo && q.extraInfo) cur.extraInfo=q.extraInfo;
           const fu=Array.isArray(q.followups)? q.followups.filter(f=>f&&f.q&&f.a) : [];
           cur.followups=[...(cur.followups||[]), ...fu];
@@ -624,8 +671,15 @@
         await signInWithEmailAndPassword(window.__fb.auth, email, pass);
         const u = window.__fb.auth.currentUser;
         if (u) {
-          currentUser = { uid: u.uid, name: u.displayName || (u.email ? u.email.split('@')[0] : '사용자'), role: ADMIN_EMAILS.has(u.email) ? 'admin' : 'user' };
           await ensureUserProfile(u);
+          // role 불러오기
+          let role = 'user';
+          try{
+            const usersMap = await loadUsersMap();
+            role = (usersMap.get(u.uid)?.role)||'user';
+          }catch(_){}
+          currentUser = { uid: u.uid, name: u.displayName || (u.email ? u.email.split('@')[0] : '사용자'), role };
+          setHeaderImmediate();
           await postLoginUI();
         }
       }catch(err){
@@ -696,6 +750,7 @@
         document.getElementById('logoutBtn').style.display='none';
         document.getElementById('headerUser').style.display='none';
         document.getElementById('headerRank').style.display='none';
+        document.getElementById('manageUsersBtn').style.display='none';
       }
     };
 
@@ -706,10 +761,16 @@
       onAuthStateChanged(window.__fb.auth, async (user)=>{
         if(user){
           await ensureUserProfile(user);
+          // role 불러오기
+          let role='user';
+          try{
+            const usersMap = await loadUsersMap();
+            role = (usersMap.get(user.uid)?.role)||'user';
+          }catch(_){}
           currentUser = {
             uid: user.uid,
             name: user.displayName || (user.email ? user.email.split('@')[0] : '사용자'),
-            role: ADMIN_EMAILS.has(user.email) ? 'admin' : 'user'
+            role
           };
           const userEl = document.getElementById('headerUser');
           const lo = document.getElementById('logoutBtn');
@@ -722,6 +783,7 @@
           document.getElementById('mainPanel').style.display='none';
           document.getElementById('loginPanel').style.display='block';
           document.getElementById('logoutBtn').style.display='none';
+          document.getElementById('manageUsersBtn').style.display='none';
           await renderRanks();
           await updateHeaderUser();
         }
@@ -771,7 +833,7 @@
       speak(q.question);
     }
     function closeQuestion(){
-      if(recognition){ try{recognition.stop();}catch(_){ } recognition=null; }
+      stopRecognition(true);
       document.getElementById('qd').close();
     }
     window.openQuestion = openQuestion;
@@ -787,36 +849,48 @@
       speak(txt);
     };
 
-    // ▼ 추가: 정답 듣기 동작
+    // 정답 듣기
     document.getElementById('ttsAnswerBtn').onclick = ()=>{
       const q = raw.find(x=>x._idx===currentIdx);
       if(!q){ alert('문항을 먼저 선택하세요.'); return; }
-      const gold = (q.answers && q.answers.length) ? (q.answers[q.active||0] || q.answers[0]) : '';
+      const gold = getActiveAnswerText(q);
       if(!gold){ alert('등록된 정답이 없습니다.'); return; }
       speak(gold);
     };
-    // ▲
 
     function startRecognition(){
       window.SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       if(!window.SpeechRecognition){ alert('이 브라우저는 음성 인식을 지원하지 않습니다.'); return; }
       recognition=new SpeechRecognition();
       recognition.lang='ko-KR'; recognition.continuous=true; recognition.interimResults=true;
-      let finalTranscript='';
+      recFinalOnly = '';
+      document.getElementById('userAnswer').innerHTML = `<span class="blink">답변녹음중.....:</span>`;
+      if(recBlinkTimer){ clearInterval(recBlinkTimer); recBlinkTimer=null; }
+      // (시각적인 깜박임은 CSS로 처리)
       recognition.onresult=(event)=>{
-        let interim='';
         for(let i=event.resultIndex;i<event.results.length;i++){
           const t=event.results[i][0].transcript;
-          if(event.results[i].isFinal){ finalTranscript += t + ' '; } else { interim += t; }
+          if(event.results[i].isFinal){ recFinalOnly += t + ' '; }
         }
-        document.getElementById('userAnswer').textContent=(finalTranscript+interim).trim();
       };
       recognition.start();
     }
-    document.getElementById('recordBtn').onclick = ()=>{
-      document.getElementById('userAnswer').textContent='(녹음중...)';
-      startRecognition();
-    };
+    function stopRecognition(fromClose=false){
+      if(recognition){
+        try{ recognition.stop(); }catch(_){}
+        recognition=null;
+      }
+      if(recBlinkTimer){ clearInterval(recBlinkTimer); recBlinkTimer=null; }
+      if(!fromClose){
+        const clean = (recFinalOnly||'').replace(/\s+/g,' ').trim();
+        if(clean){
+          document.getElementById('userAnswer').textContent = clean;
+        }else{
+          document.getElementById('userAnswer').textContent = '';
+        }
+      }
+    }
+    document.getElementById('recordBtn').onclick = ()=>{ startRecognition(); };
 
     function similarity(a,b){
       const sa=new Set(String(a).split(/\s+/).filter(Boolean));
@@ -824,16 +898,23 @@
       let inter=0; sa.forEach(w=>{ if(sb.has(w)) inter++; });
       return inter/(sa.size+sb.size-inter||1);
     }
+    function getActiveAnswerText(q){
+      if(!q || !Array.isArray(q.answers) || !q.answers.length) return '';
+      const idx = (q.active||0);
+      const pick = q.answers[idx] || q.answers[0];
+      return answerText(pick);
+    }
     document.getElementById('submitBtn').onclick = ()=>{
       const q=raw.find(x=>x._idx===currentIdx);
       if(!q) return;
-      const gold=(q.answers&&q.answers.length)? (q.answers[q.active||0]||q.answers[0]) : '';
+      stopRecognition(false);
+      const gold=getActiveAnswerText(q);
       const user=document.getElementById('userAnswer').textContent;
-      const sim=similarity(user,gold);
       if(!gold){
         document.getElementById('result').innerHTML = `<div class='answer-box'>정답이 등록되어 있지 않습니다. <b>“정답 추가”</b> 버튼으로 정답을 등록하세요.</div>`;
         return;
       }
+      const sim=similarity(user,gold);
       document.getElementById('result').innerHTML = `<div class='answer-box'>${esc(gold)}</div><div class='score'>유사도 ${(sim*100).toFixed(1)}%</div>`;
       speak('정답입니다. ' + gold);
     };
@@ -861,23 +942,37 @@
       }catch(e){}
     };
 
+    function canEditAnswer(ans){
+      if(!currentUser) return false;
+      if(currentUser.role==='admin') return true;
+      const owner = answerOwnerUid(ans);
+      return owner && owner === currentUser.uid;
+    }
+
     function renderAnswerList(){
       const holder=document.getElementById('extraAnswers');
       const q=raw.find(x=>x._idx===currentIdx);
       if(!q){ holder.innerHTML=''; return; }
+
       const items=(q.answers||[]).map((ans,i)=>{
         const checked=(q.active||0)===i?'checked':'';
+        const txt = answerText(ans);
+        const ownerTag = answerOwnerName(ans) ? ` &lt;${esc(answerOwnerName(ans))}&gt;` : '';
+        const delBtn = canEditAnswer(ans) ? `<button class="btn danger" data-del-ans="${i}">🗑</button>` : '';
         return `<div style="display:flex;gap:8px;align-items:flex-start;margin:6px 0">
           <input type="radio" name="ansPick" value="${i}" ${checked} style="margin-top:4px"/>
-          <div style="flex:1">${esc(ans)}</div>
-          <button class="btn danger" data-del-ans="${i}">🗑</button>
+          <div style="flex:1">${esc(txt)}${ownerTag}</div>
+          ${delBtn}
         </div>`;
       }).join('') || '<div style="opacity:.7">등록된 정답이 없습니다.</div>';
 
       holder.innerHTML =
-        `<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin:10px 0 6px">
+        `<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin:10px 0 6px; flex-wrap:wrap">
            <h3 style="margin:0">정답 목록</h3>
-           <button id="addAnswerBtn_inline" class="btn">➕ 정답 추가</button>
+           <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+             <button id="addAnswerBtn_inline" class="btn">➕ 정답 추가</button>
+             <button id="ttsAnswerBtn_inline" class="btn">🔊 정답 듣기</button>
+           </div>
          </div>` + items;
 
       holder.querySelectorAll('input[name="ansPick"]').forEach(r=>{
@@ -889,6 +984,9 @@
       holder.querySelectorAll('[data-del-ans]').forEach(btn=>{
         btn.addEventListener('click', async ()=>{
           const i=parseInt(btn.getAttribute('data-del-ans'),10);
+          // 권한 체크 재확인
+          const target = (q.answers||[])[i];
+          if(!canEditAnswer(target)){ alert('이 정답을 삭제할 권한이 없습니다.'); return; }
           q.answers.splice(i,1);
           if((q.active||0)>=q.answers.length) q.active=Math.max(0,q.answers.length-1);
           await persistQuestion(q);
@@ -899,20 +997,47 @@
       const addInline = holder.querySelector('#addAnswerBtn_inline');
       if(addInline){
         addInline.addEventListener('click', async ()=>{
+          if(!currentUser){ alert('로그인 후 사용하세요.'); return; }
           const val=prompt('추가할 정답(변형)을 입력하세요'); if(!val) return;
           q.answers=q.answers||[];
-          if(!q.answers.includes(val)) q.answers.push(val);
+          // 새 포맷으로 저장
+          const rec = {
+            text: val,
+            ownerUid: currentUser.uid,
+            ownerName: currentUser.name||'사용자',
+            createdAt: new Date().toISOString()
+          };
+          // 중복 텍스트 방지
+          const exists = (q.answers||[]).some(a=>answerText(a)===val);
+          if(!exists) q.answers.push(rec);
           q.active=q.answers.length-1;
           await persistQuestion(q);
           renderAnswerList();
         });
       }
+
+      const ttsInline = holder.querySelector('#ttsAnswerBtn_inline');
+      if(ttsInline){
+        ttsInline.addEventListener('click', ()=>{
+          const gold = getActiveAnswerText(q);
+          if(!gold){ alert('등록된 정답이 없습니다.'); return; }
+          speak(gold);
+        });
+      }
     }
     document.getElementById('addAnswerBtn').onclick = async ()=>{
       const q=raw.find(x=>x._idx===currentIdx); if(!q) return;
+      if(!currentUser){ alert('로그인 후 사용하세요.'); return; }
       const val=prompt('추가할 정답(변형)을 입력하세요'); if(!val) return;
       q.answers=q.answers||[];
-      if(!q.answers.includes(val)) q.answers.push(val);
+      const rec = {
+        text: val,
+        ownerUid: currentUser.uid,
+        ownerName: currentUser.name||'사용자',
+        createdAt: new Date().toISOString()
+      };
+      const exists = (q.answers||[]).some(a=>answerText(a)===val);
+      if(!exists) q.answers.push(rec);
       q.active=q.answers.length-1;
       await persistQuestion(q);
       renderAnswerList();
@@ -983,7 +1108,7 @@
       const seed = {
         subject:normSubj(subj),
         question:ques,
-        answers:[answ],
+        answers:[{ text: answ, ownerUid: currentUser?.uid||'', ownerName: currentUser?.name||'', createdAt: new Date().toISOString() }],
         active:0,
         extraInfo: `● 질문 의도: “${ques}”\n● 답변 구조: (정의)→(핵심)→(사례)→(보완)\n● 말머리: 결론→근거 2~3→사례→요약`,
         followups: [
@@ -1026,7 +1151,7 @@
           const shared = await loadShared();
           const progress = await loadProgress();
           const payload = {
-            version: 3,
+            version: 4,
             exportedAt: new Date().toISOString(),
             shared,
             progress
@@ -1074,6 +1199,56 @@
         importBtn.__bound=true;
       }
     });
+
+    /* ================= 관리자: 사용자 관리 ================= */
+    async function openUserManage(){
+      if(!currentUser || currentUser.role!=='admin'){ alert('관리자만 접근 가능합니다.'); return; }
+      const listEl = document.getElementById('userMngList');
+      listEl.innerHTML = '<div style="opacity:.7">로딩 중…</div>';
+      const usersMap = await loadUsersMap();
+      const items = [];
+      for(const [uid, info] of usersMap.entries()){
+        if(info.role==='admin') continue; // 관리자 숨김
+        const row = `
+          <div style="display:flex;gap:10px;align-items:center;border:1px solid #283162;padding:8px;border-radius:10px">
+            <div style="flex:1">
+              <div><b>${esc(info.displayName||'사용자')}</b> <span class="pill">${esc(info.role||'user')}</span></div>
+              <div style="opacity:.7;font-size:12px">${esc(info.email||'')}</div>
+            </div>
+            <button class="btn danger" data-del-user="${uid}">사용자 삭제</button>
+          </div>
+        `;
+        items.push(row);
+      }
+      listEl.innerHTML = items.length ? items.join('') : '<div style="opacity:.7">일반 사용자가 없습니다.</div>';
+      listEl.querySelectorAll('[data-del-user]').forEach(btn=>{
+        btn.addEventListener('click', async ()=>{
+          const uid = btn.getAttribute('data-del-user');
+          if(!confirm('해당 사용자를 삭제하시겠습니까? (진행도도 함께 삭제)')) return;
+          try{
+            if(window.__cloudReady){
+              const { deleteDoc, doc } = window.__fb_api;
+              const db = window.__fb.db;
+              await deleteDoc(doc(db,'users', uid));
+              await deleteDoc(doc(db,'progress', uid));
+            }
+            // 로컬에서도 제거
+            const prog = lsGet(LS_PROG,{});
+            delete prog[uid];
+            lsSet(LS_PROG, prog);
+            await openUserManage(); // 새로고침
+            await renderRanks();
+            await updateHeaderUser();
+            alert('삭제되었습니다.');
+          }catch(e){
+            alert('삭제 실패: ' + (e?.message||e));
+          }
+        });
+      });
+      document.getElementById('userMngDlg').showModal();
+    }
+    document.getElementById('manageUsersBtn').addEventListener('click', openUserManage);
+    document.getElementById('userMngClose').addEventListener('click', ()=> document.getElementById('userMngDlg').close());
 
     /* ================= 부트스트랩 ================= */
     async function bootstrap(){
